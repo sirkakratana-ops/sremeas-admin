@@ -1,378 +1,256 @@
 import React, { useState, useEffect } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from './utils';
 
-// Initialize your explicit Supabase Client
-const SUPABASE_URL = "https://hllsxqjyyoewkbgmwizs.supabase.co";
-const SUPABASE_KEY = "sb_publishable_KZbdTXvOcVfnsd9kzEgzAQ_u4T8h2Bt";
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+import InvoiceTab from './components/InvoiceTab';
+import CustomerTab from './components/CustomerTab';
+import ProductTab from './components/ProductTab';
+import ReportTab from './components/ReportTab';
+import UserTab from './components/UserTab';
 
 export default function App() {
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
+  const [isCompactMode, setIsCompactMode] = useState(true);
   const [activeTab, setActiveTab] = useState('invoice');
-  const [products, setProducts] = useState([]);
-  const [customers, setCustomers] = useState([]);
-  const [invoices, setInvoices] = useState([]);
   
-  // Search Filters
-  const [searchInv, setSearchInv] = useState('');
-  const [searchCust, setSearchCust] = useState('');
-  const [searchProd, setSearchProd] = useState('');
+  const [session, setSession] = useState(null);
+  const [userRole, setUserRole] = useState(null);
+  const [userPerms, setUserPerms] = useState({});
+  
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
-  // Form States (For Adds/Edits)
-  const [invoiceId, setInvoiceId] = useState('');
-  const [invoiceStatus, setInvoiceStatus] = useState('Paid');
-  const [selectedCustomerId, setSelectedCustomerId] = useState('');
-  const [invoiceRows, setInvoiceRows] = useState([{ id: 'init', product_id: '', quantity: 1, unit_price: '' }]);
-  const [editingInvoiceId, setEditingInvoiceId] = useState(null);
+  useEffect(() => { document.title = "SM - Admin Dashboard"; }, []);
 
-  const [custName, setCustName] = useState('');
-  const [custPhone, setCustPhone] = useState('');
-  const [editingCustomerId, setEditingCustomerId] = useState(null);
-
-  const [prodName, setProdName] = useState('');
-  const [prodCategory, setProdCategory] = useState('Granular Fertilizer');
-  const [prodPrice, setProdPrice] = useState('');
-  const [editingProductId, setEditingProductId] = useState(null);
-
-  // Initialize Data
   useEffect(() => {
-    fetchInitialData();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) fetchUserRole(session.user.id);
+    });
+    supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session) fetchUserRole(session.user.id);
+      else {
+        setUserRole(null);
+        setUserPerms({});
+      }
+    });
   }, []);
 
-  useEffect(() => {
-    fetchInvoices();
-  }, [searchInv]);
-
-  const fetchInitialData = async () => {
-    await fetchCustomers();
-    await fetchProducts();
-    await fetchInvoices();
-  };
-
-  const fetchCustomers = async () => {
-    const { data } = await supabase.from('customers').select('*').order('name');
-    if (data) setCustomers(data);
-  };
-
-  const fetchProducts = async () => {
-    const { data } = await supabase.from('products').select('*').order('product_name');
-    if (data) setProducts(data);
-  };
-
-  const fetchInvoices = async () => {
-    let query = supabase.from('invoices').select('*, customers(name)').order('invoice_date', { ascending: false });
-    if (searchInv.trim() !== '') {
-      if (!isNaN(searchInv)) {
-        query = query.ilike('id', `%${searchInv}%`);
-      } else {
-        query = supabase.from('invoices').select('*, customers!inner(name)').ilike('customers.name', `%${searchInv}%`);
-      }
-    }
-    const { data } = await query;
-    if (data) setInvoices(data);
-  };
-
-  // --- INVOICE DYNAMIC ROW MATHS ---
-  const addItemRow = () => {
-    setInvoiceRows([...invoiceRows, { id: 'row_' + Date.now() + Math.random(), product_id: '', quantity: 1, unit_price: '' }]);
-  };
-
-  const removeItemRow = (id) => {
-    if (invoiceRows.length > 1) {
-      setInvoiceRows(invoiceRows.filter(r => r.id !== id));
-    } else {
-      alert("វិក្កយបត្រត្រូវមានទំនិញយ៉ាងហោចណាស់ ១ មុខ!");
-    }
-  };
-
-  const handleRowChange = (id, field, value) => {
-    const updated = invoiceRows.map(row => {
-      if (row.id === id) {
-        let newRow = { ...row, [field]: value };
-        if (field === 'product_id') {
-          const matched = products.find(p => p.id == value);
-          newRow.unit_price = matched ? matched.default_price_riel : '';
-        }
-        return newRow;
-      }
-      return row;
-    });
-    setInvoiceRows(updated);
-  };
-
-  const calculateGrandTotal = () => {
-    return invoiceRows.reduce((sum, r) => sum + (Number(r.quantity || 0) * Number(r.unit_price || 0)), 0);
-  };
-
-  // --- SUBMISSIONS (CRUD INJECTIONS) ---
-  const submitInvoice = async (e) => {
-    e.preventDefault();
-    const grandTotal = calculateGrandTotal();
-    try {
-      if (editingInvoiceId) {
-        await supabase.from('invoices').update({ customer_id: selectedCustomerId, total_amount: grandTotal, status: invoiceStatus }).eq('id', invoiceId);
-        await supabase.from('invoice_items').delete().eq('invoice_id', invoiceId);
-      } else {
-        const { error } = await supabase.from('invoices').insert([{ id: invoiceId, customer_id: selectedCustomerId, invoice_date: new Date().toISOString(), total_amount: grandTotal, status: invoiceStatus }]);
-        if (error) throw error;
-      }
-
-      const itemsPayload = invoiceRows.map(row => {
-        const p = products.find(prod => prod.id == row.product_id);
-        return { invoice_id: invoiceId, product_id: p.id, product_name: p.product_name, category: p.category, quantity: Number(row.quantity), unit_price: Number(row.unit_price) };
-      });
-
-      await supabase.from('invoice_items').insert(itemsPayload);
-      alert("✅ រក្សាទុកវិក្កយបត្រជោគជ័យ!");
-      resetInvoiceForm();
-      fetchInvoices();
-    } catch (err) { alert(err.message); }
-  };
-
-  const submitCustomer = async (e) => {
-    e.preventDefault();
-    const cleanPhone = custPhone.replace(/[^0-9+]/g, '');
-    const calculatedId = cleanPhone.replace(/^\+?855/, '');
-    try {
-      if (editingCustomerId) {
-        await supabase.from('customers').update({ name: custName, phone: cleanPhone }).eq('id', editingCustomerId);
-      } else {
-        await supabase.from('customers').insert([{ id: calculatedId, name: custName, phone: cleanPhone }]);
-      }
-      alert("✅ រក្សាទុកអតិថិជនជោគជ័យ!");
-      resetCustomerForm();
-      fetchCustomers();
-    } catch (err) { alert(err.message); }
-  };
-
-  const submitProduct = async (e) => {
-    e.preventDefault();
-    try {
-      if (editingProductId) {
-        await supabase.from('products').update({ product_name: prodName, category: prodCategory, default_price_riel: Number(prodPrice) }).eq('id', editingProductId);
-      } else {
-        await supabase.from('products').insert([{ product_name: prodName, category: prodCategory, default_price_riel: Number(prodPrice) }]);
-      }
-      alert("✅ រក្សាទុកមុខទំនិញជោគជ័យ!");
-      resetProductForm();
-      fetchProducts();
-    } catch (err) { alert(err.message); }
-  };
-
-  // --- FORMS LOAD / RESET MECHANICS ---
-  const loadInvoiceEdit = async (inv) => {
-    setEditingInvoiceId(inv.id);
-    setInvoiceId(inv.id);
-    setInvoiceStatus(inv.status);
-    setSelectedCustomerId(inv.customer_id);
-    const { data } = await supabase.from('invoice_items').select('*').eq('invoice_id', inv.id);
+  const fetchUserRole = async (userId) => {
+    const { data } = await supabase.from('user_roles').select('*').eq('user_id', userId).single();
     if (data) {
-      setInvoiceRows(data.map(d => ({ id: 'row_' + Math.random(), product_id: d.product_id, quantity: d.quantity, unit_price: d.unit_price })));
+      setUserRole(data.role);
+      setUserPerms(data.permissions || {});
     }
   };
 
-  const resetInvoiceForm = () => {
-    setEditingInvoiceId(null); setInvoiceId(''); setInvoiceStatus('Paid'); setSelectedCustomerId('');
-    setInvoiceRows([{ id: 'init', product_id: '', quantity: 1, unit_price: '' }]);
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: loginPassword });
+    if (error) alert("❌ លេខសម្ងាត់មិនត្រឹមត្រូវ: " + error.message);
+    setAuthLoading(false);
   };
 
-  const resetCustomerForm = () => { setEditingCustomerId(null); setCustName(''); setCustPhone(''); };
-  const resetProductForm = () => { setEditingProductId(null); setProdName(''); setProdPrice(''); };
+  const handleLogout = async () => { await supabase.auth.signOut(); };
 
-  return (
-    <div className="container my-5" style={{ maxWidth: '1000px' }}>
-      <div className="bg-success text-white p-4 rounded-top shadow-sm">
-        <h1 className="h3 mb-1">🌾 ហាងកសិកម្ម ស្រែមាស (Sremeas) - Admin</h1>
-        <p className="mb-0 opacity-75 small">ប្រព័ន្ធគ្រប់គ្រងរួម៖ វិក្កយបត្រ អតិថិជន និងទំនិញ</p>
-      </div>
-
-      <ul className="nav nav-tabs bg-white px-3 pt-2 border-start border-end">
-        <li className="nav-item">
-          <button className={`nav-link ${activeTab === 'invoice' ? 'active text-white' : 'text-success'}`} onClick={() => setActiveTab('invoice')}>📝 វិក្កយបត្រ</button>
-        </li>
-        <li className="nav-item">
-          <button className={`nav-link ${activeTab === 'customer' ? 'active text-white' : 'text-success'}`} onClick={() => setActiveTab('customer')}>👥 អតិថិជន</button>
-        </li>
-        <li className="nav-item">
-          <button className={`nav-link ${activeTab === 'product' ? 'active text-white' : 'text-success'}`} onClick={() => setActiveTab('product')}>📦 ទំនិញ</button>
-        </li>
-      </ul>
-
-      <div className="bg-white p-4 rounded-bottom shadow-sm border border-top-0">
-        {/* INVOICE TAB */}
-        {activeTab === 'invoice' && (
-          <div className="row g-4">
-            <div className="col-lg-6 border-end pe-lg-3">
-              <h5 className="text-success mb-3">{editingInvoiceId ? `⚙️ កែប្រែវិក្កយបត្រ #${editingInvoiceId}` : '➕ បង្កើតវិក្កយបត្រថ្មី'}</h5>
-              <form onSubmit={submitInvoice}>
-                <div className="row g-2 mb-3 bg-light p-2 rounded border">
-                  <div className="col-sm-6">
-                    <label className="form-label small fw-bold">លេខវិក្កយបត្រ</label>
-                    <input type="text" value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} disabled={!!editingInvoiceId} required className="form-control form-control-sm" />
-                  </div>
-                  <div className="col-sm-6">
-                    <label className="form-label small fw-bold">ស្ថានភាព</label>
-                    <select value={invoiceStatus} onChange={(e) => setInvoiceStatus(e.target.value)} className="form-select form-select-sm">
-                      <option value="Paid">ទូទាត់រួចរាល់ ✅</option>
-                      <option value="Debt">ជំពាក់ ⚠️</option>
-                    </select>
-                  </div>
-                  <div className="col-12 mt-2">
-                    <label className="form-label small fw-bold">អតិថិជន</label>
-                    <select value={selectedCustomerId} onChange={(e) => setSelectedCustomerId(e.target.value)} required className="form-select form-select-sm">
-                      <option value="">-- ជ្រើសរើសអតិថិជន --</option>
-                      {customers.map(c => <option key={c.id} value={c.id}>{c.name} (ID: {c.id})</option>)}
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mb-3">
-                  <div className="d-flex justify-content-between align-items-center mb-2">
-                    <h6 className="mb-0 text-secondary small fw-bold">📦 មុខទំនិញ</h6>
-                    <button type="button" onClick={addItemRow} className="btn btn-outline-success btn-sm py-0 px-2 small" style={{ fontSize: '11px' }}>+ ថែមទំនិញ</button>
-                  </div>
-                  {invoiceRows.map((row) => (
-                    <div key={row.id} className="row g-1 align-items-center mb-2 bg-white p-1 rounded border shadow-sm mx-0">
-                      <div className="col-6">
-                        <select value={row.product_id} onChange={(e) => handleRowChange(row.id, 'product_id', e.target.value)} required className="form-select form-select-sm">
-                          <option value="">-- ជ្រើសរើសទំនិញ --</option>
-                          {products.map(p => <option key={p.id} value={p.id}>{p.product_name}</option>)}
-                        </select>
-                      </div>
-                      <div className="col-2">
-                        <input type="number" min="1" value={row.quantity} onChange={(e) => handleRowChange(row.id, 'quantity', e.target.value)} required className="form-control form-control-sm text-center" />
-                      </div>
-                      <div className="col-3">
-                        <input type="number" min="0" value={row.unit_price} onChange={(e) => handleRowChange(row.id, 'unit_price', e.target.value)} required className="form-control form-control-sm" />
-                      </div>
-                      <div className="col-1 text-center">
-                        <button type="button" onClick={() => removeItemRow(row.id)} className="text-danger border-0 bg-transparent">❌</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="p-3 rounded grand-total-box d-flex justify-content-between align-items-center">
-                  <div>សរុប: <span className="fs-5">{calculateGrandTotal().toLocaleString()}</span> ៛</div>
-                  <div className="d-flex gap-2">
-                    {editingInvoiceId && <button type="button" onClick={resetInvoiceForm} className="btn btn-secondary btn-sm">បោះបង់</button>}
-                    <button type="submit" className="btn btn-success btn-sm fw-bold">💾 រក្សាទុក</button>
-                  </div>
-                </div>
-              </form>
-            </div>
-
-            <div className="col-lg-6 ps-lg-3">
-              <h5 className="text-secondary mb-3">🔍 ប្រវត្តិវិក្កយបត្រ</h5>
-              <input type="text" value={searchInv} onChange={(e) => setSearchInv(e.target.value)} placeholder="ស្វែងរកលេខវិក្កយបត្រ ឬ ឈ្មោះអតិថិជន..." className="form-control form-control-sm mb-3" />
-              <div style={{ maxHeight: '420px', overflowY: 'auto' }}>
-                <table className="table table-sm table-striped table-hover small">
-                  <thead className="table-dark">
-                    <tr><th>លេខវិក្កយបត្រ</th><th>អតិថិជន</th><th>សរុប ($)</th><th>ស្ថានភាព</th><th>កែ</th></tr>
-                  </thead>
-                  <tbody>
-                    {invoices.map(inv => (
-                      <tr key={inv.id}>
-                        <td><strong>{inv.id}</strong></td>
-                        <td>{inv.customers ? inv.customers.name : 'Unknown'}</td>
-                        <td>${(inv.total_amount / 4000).toLocaleString()}</td>
-                        <td><span className={`badge ${inv.status === 'Paid' ? 'bg-success' : 'bg-warning text-dark'}`}>{inv.status}</span></td>
-                        <td><button className="btn btn-primary btn-xs py-0 px-1 text-xs" onClick={() => loadInvoiceEdit(inv)}>⚙️</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+  // --- LOGIN SCREEN (TAILWIND CSS) ---
+  if (!session) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4 font-sans">
+        <div className="bg-white shadow-xl rounded-2xl border border-gray-100 w-full max-w-md overflow-hidden">
+          <div className="text-center p-6 border-b border-gray-100 bg-white">
+            <h2 className="text-3xl font-black text-gray-900 tracking-tight">SM</h2>
+            <p className="text-gray-500 text-sm mt-1">សូមចូលគណនី (Login)</p>
+          </div>
+          <div className="p-6 md:p-8">
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-gray-600 text-xs font-bold mb-1 uppercase tracking-wider">អ៊ីមែល (Email)</label>
+                <input 
+                  type="email" 
+                  required 
+                  value={loginEmail} 
+                  onChange={(e) => setLoginEmail(e.target.value)} 
+                  className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:bg-white transition-all" 
+                  placeholder="name@sremeas.com"
+                />
               </div>
-            </div>
+              <div>
+                <label className="block text-gray-600 text-xs font-bold mb-1 uppercase tracking-wider">លេខសម្ងាត់ (Password)</label>
+                <input 
+                  type="password" 
+                  required 
+                  value={loginPassword} 
+                  onChange={(e) => setLoginPassword(e.target.value)} 
+                  className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:bg-white transition-all" 
+                  placeholder="••••••••"
+                />
+              </div>
+              <button 
+                type="submit" 
+                disabled={authLoading} 
+                className="w-full bg-gray-900 hover:bg-gray-800 text-white font-bold py-2.5 rounded-lg shadow-sm hover:shadow transition-all disabled:opacity-50 text-sm"
+              >
+                {authLoading ? 'កំពុងភ្ជាប់...' : 'ចូលប្រព័ន្ធ 🔓'}
+              </button>
+            </form>
           </div>
-        )}
-
-        {/* CUSTOMER TAB */}
-        {activeTab === 'customer' && (
-          <div className="row g-4">
-            <div className="col-md-5 border-end pe-md-4">
-              <h5 className="text-success mb-3">{editingCustomerId ? '⚙️ កែប្រែអតិថិជន' : '➕ បន្ថែមអតិថិជនថ្មី'}</h5>
-              <form onSubmit={submitCustomer}>
-                <div className="mb-3">
-                  <label className="form-label small fw-bold">ឈ្មោះអតិថិជន</label>
-                  <input type="text" value={custName} onChange={(e) => setCustName(e.target.value)} required className="form-control" />
-                </div>
-                <div className="mb-3">
-                  <label className="form-label small fw-bold">លេខទូរស័ព្ទ</label>
-                  <input type="text" value={custPhone} onChange={(e) => setCustPhone(e.target.value)} placeholder="+855..." required className="form-control" />
-                </div>
-                <div className="d-flex gap-2">
-                  {editingCustomerId && <button type="button" onClick={resetCustomerForm} className="btn btn-secondary w-50 btn-sm">បោះបង់</button>}
-                  <button type="submit" className="btn btn-success w-100 btn-sm">💾 រក្សាទុក</button>
-                </div>
-              </form>
-            </div>
-            <div className="col-md-7 ps-md-4">
-              <h5 className="text-secondary mb-3">🔍 ស្វែងរកអតិថិជន</h5>
-              <input type="text" value={searchCust} onChange={(e) => setSearchCust(e.target.value)} placeholder="ស្វែងរកតាមឈ្មោះ..." className="form-control mb-3" />
-              <table className="table table-striped table-hover small">
-                <thead class="table-dark">
-                  <tr><th>ID</th><th>ឈ្មោះ</th><th>លេខទូរស័ព្ទ</th><th>កែ</th></tr>
-                </thead>
-                <tbody>
-                  {customers.filter(c => c.name.toLowerCase().includes(searchCust.toLowerCase())).map(c => (
-                    <tr key={c.id}><td>{c.id}</td><td><strong>{c.name}</strong></td><td>{c.phone}</td>
-                    <td><button className="btn btn-warning btn-xs py-0 px-1 text-xs" onClick={() => { setEditingCustomerId(c.id); setCustName(c.name); setCustPhone(c.phone); }}>✏️</button></td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* PRODUCT TAB */}
-        {activeTab === 'product' && (
-          <div className="row g-4">
-            <div className="col-md-5 border-end pe-md-4">
-              <h5 className="text-success mb-3">{editingProductId ? '⚙️ កែប្រែទំនិញ' : '➕ បន្ថែមទំនិញថ្មី'}</h5>
-              <form onSubmit={submitProduct}>
-                <div className="mb-3">
-                  <label className="form-label small fw-bold">ឈ្មោះទំនិញ</label>
-                  <input type="text" value={prodName} onChange={(e) => setProdName(e.target.value)} required className="form-control" />
-                </div>
-                <div className="mb-3">
-                  <label className="form-label small fw-bold">ប្រភេទក្រុមទំនិញ</label>
-                  <select value={prodCategory} onChange={(e) => setProdCategory(e.target.value)} className="form-select">
-                    <option value="Granular Fertilizer">ជីគ្រាប់ (Granular Fertilizer)</option>
-                    <option value="Liquid Fertilizer">ជីទឹក (Liquid Fertilizer)</option>
-                    <option value="Powder Fertilizer">ជីម្សៅ (Powder Fertilizer)</option>
-                    <option value="Pesticide">ថ្នាំសត្វល្អិត (Pesticide)</option>
-                    <option value="Fungicide">ថ្នាំជំងឺ (Fungicide)</option>
-                    <option value="Herbicide">ថ្នាំស្មៅ (Herbicide)</option>
-                  </select>
-                </div>
-                <div className="mb-3">
-                  <label className="form-label small fw-bold">តម្លៃគោលរាយ (៛)</label>
-                  <input type="number" value={prodPrice} onChange={(e) => setProdPrice(e.target.value)} required className="form-control" />
-                </div>
-                <div className="d-flex gap-2">
-                  {editingProductId && <button type="button" onClick={resetProductForm} className="btn btn-secondary w-50 btn-sm">បោះបង់</button>}
-                  <button type="submit" className="btn btn-success w-100 btn-sm">💾 រក្សាទុក</button>
-                </div>
-              </form>
-            </div>
-            <div className="col-md-7 ps-md-4">
-              <h5 className="text-secondary mb-3">🔍 ស្វែងរកមុខទំនិញ</h5>
-              <input type="text" value={searchProd} onChange={(e) => setSearchProd(e.target.value)} placeholder="ស្វែងរកឈ្មោះទំនិញ..." className="form-control mb-3" />
-              <table className="table table-striped table-hover small">
-                <thead class="table-dark">
-                  <tr><th>ឈ្មោះទំនិញ</th><th>ប្រភេទក្រុម</th><th>តម្លៃគោល (៛)</th><th>កែ</th></tr>
-                </thead>
-                <tbody>
-                  {products.filter(p => p.product_name.toLowerCase().includes(searchProd.toLowerCase())).map(p => (
-                    <tr key={p.id}><td><strong>{p.product_name}</strong></td><td>{p.category}</td><td>{Number(p.default_price_riel).toLocaleString()} ៛</td>
-                    <td><button className="btn btn-warning btn-xs py-0 px-1 text-xs" onClick={() => { setEditingProductId(p.id); setProdName(p.product_name); setProdCategory(p.category); setProdPrice(p.default_price_riel); }}>✏️</button></td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        </div>
       </div>
+    );
+  }
+
+  // --- MAIN APP DASHBOARD (TAILWIND CSS) ---
+  return (
+    <div className="min-h-screen flex bg-gray-100 font-sans antialiased">
+      
+      {/* SIDEBAR */}
+      <aside 
+        className={`no-print flex flex-col flex-shrink-0 bg-white border-r border-gray-200 shadow-sm transition-all duration-300 ${
+          isSidebarCollapsed ? 'w-20' : 'w-64'
+        }`}
+      >
+        {/* Header Logo */}
+        <div className={`flex items-center justify-between border-b border-gray-200 ${isCompactMode ? 'p-2.5' : 'p-4'}`}>
+          {!isSidebarCollapsed && (
+            <span className="text-lg font-bold text-gray-900 truncate px-2">🌾 SM</span>
+          )}
+          <button 
+            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-600 transition-colors mx-auto" 
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            title="Toggle Sidebar"
+          >
+            ☰
+          </button>
+        </div>
+
+        {/* Nav Links */}
+        <nav className="flex-1 p-2 space-y-1 mt-2">
+          {(userRole === 'admin' || userPerms.invoice) && (
+            <button 
+              onClick={() => setActiveTab('invoice')}
+              className={`w-full flex items-center px-3 font-bold rounded-lg text-sm transition-all ${
+                isCompactMode ? 'py-2' : 'py-3'
+              } ${
+                activeTab === 'invoice' 
+                  ? 'bg-gray-900 text-white shadow-sm' 
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="text-base">📝</span>
+              {!isSidebarCollapsed && <span className="ml-3 truncate">វិក្កយបត្រ</span>}
+            </button>
+          )}
+
+          {(userRole === 'admin' || userPerms.customer) && (
+            <button 
+              onClick={() => setActiveTab('customer')}
+              className={`w-full flex items-center px-3 font-bold rounded-lg text-sm transition-all ${
+                isCompactMode ? 'py-2' : 'py-3'
+              } ${
+                activeTab === 'customer' 
+                  ? 'bg-gray-900 text-white shadow-sm' 
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="text-base">👥</span>
+              {!isSidebarCollapsed && <span className="ml-3 truncate">អតិថិជន</span>}
+            </button>
+          )}
+
+          {(userRole === 'admin' || userPerms.product) && (
+            <button 
+              onClick={() => setActiveTab('product')}
+              className={`w-full flex items-center px-3 font-bold rounded-lg text-sm transition-all ${
+                isCompactMode ? 'py-2' : 'py-3'
+              } ${
+                activeTab === 'product' 
+                  ? 'bg-gray-900 text-white shadow-sm' 
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="text-base">📦</span>
+              {!isSidebarCollapsed && <span className="ml-3 truncate">មុខទំនិញ</span>}
+            </button>
+          )}
+
+          {(userRole === 'admin' || userPerms.report) && (
+            <button 
+              onClick={() => setActiveTab('report')}
+              className={`w-full flex items-center px-3 font-bold rounded-lg text-sm transition-all ${
+                isCompactMode ? 'py-2' : 'py-3'
+              } ${
+                activeTab === 'report' 
+                  ? 'bg-gray-900 text-white shadow-sm' 
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="text-base">📊</span>
+              {!isSidebarCollapsed && <span className="ml-3 truncate">របាយការណ៍</span>}
+            </button>
+          )}
+
+          {(userRole === 'admin' || userPerms.users) && (
+            <button 
+              onClick={() => setActiveTab('users')}
+              className={`w-full flex items-center px-3 font-bold rounded-lg text-sm transition-all ${
+                isCompactMode ? 'py-2' : 'py-3'
+              } ${
+                activeTab === 'users' 
+                  ? 'bg-gray-900 text-white shadow-sm' 
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="text-base">🛡️</span>
+              {!isSidebarCollapsed && <span className="ml-3 truncate">អ្នកប្រើប្រាស់</span>}
+            </button>
+          )}
+        </nav>
+
+        {/* Footer Actions */}
+        <div className={`p-3 border-t border-gray-200 ${isSidebarCollapsed ? 'text-center' : ''}`}>
+          <button 
+            onClick={() => setIsCompactMode(!isCompactMode)} 
+            className={`w-full mb-3 text-xs font-bold py-1.5 px-2 rounded transition-colors ${
+              isCompactMode 
+                ? 'bg-gray-900 text-white hover:bg-gray-800' 
+                : 'border border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            {isSidebarCollapsed ? (isCompactMode ? '🗜️' : '🖥️') : (isCompactMode ? '🗜️ បិទ Compact' : '🖥️ បើក Compact')}
+          </button>
+
+          {!isSidebarCollapsed && (
+            <div className="mb-3 space-y-1">
+              <span className="inline-block bg-gray-100 text-gray-800 text-[10px] font-extrabold px-2 py-0.5 rounded border border-gray-200 uppercase">
+                {userRole === 'admin' ? '👑 Admin' : '👤 Staff'}
+              </span>
+              <p className="text-gray-500 text-[11px] font-mono truncate">{session.user.email}</p>
+            </div>
+          )}
+
+          <button 
+            onClick={handleLogout} 
+            className="w-full text-xs font-bold text-red-600 border border-red-200 hover:bg-red-50 py-1.5 rounded transition-colors"
+          >
+            {isSidebarCollapsed ? '🚪' : 'ចាកចេញ'}
+          </button>
+        </div>
+      </aside>
+
+      {/* MAIN CONTENT AREA */}
+      <main className={`flex-1 overflow-y-auto ${isCompactMode ? 'p-2 md:p-4' : 'p-4 md:p-8'}`} style={{ maxHeight: '100vh' }}>
+        <div className={`bg-white shadow-sm border border-gray-200 ${isCompactMode ? 'rounded-xl p-4' : 'rounded-2xl p-6 md:p-8'}`}>
+          {activeTab === 'invoice' && <InvoiceTab isCompactMode={isCompactMode} />}
+          {activeTab === 'customer' && <CustomerTab isCompactMode={isCompactMode} />}
+          {activeTab === 'product' && <ProductTab isCompactMode={isCompactMode} />}
+          {activeTab === 'report' && <ReportTab isCompactMode={isCompactMode} />}
+          {activeTab === 'users' && <UserTab isCompactMode={isCompactMode} />}
+        </div>
+      </main>
+
     </div>
   );
 }
